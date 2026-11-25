@@ -554,6 +554,7 @@ mkdir -p "$WP_PATH"
 
 if ! command -v wp >/dev/null 2>&1; then
   curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+  chmod +x /usr/local/bin/wp
 fi
 
 if [ ! -f "$WP_PATH/wp-includes/version.php" ]; then
