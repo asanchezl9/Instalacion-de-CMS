@@ -8,6 +8,8 @@ En esta práctica desplegamos **[WordPress](https://es.wordpress.org/)** en **Al
 - **Capa 3 — Balanceador de BD (HAProxy)**: Intermediario entre **WordPress** y la base de datos. Reparte las conexiones entre los nodos activos del clúster.
 - **Capa 4 — Clúster de datos ([MariaDB Galera](https://mariadb.com/docs/galera-cluster))**: Tres nodos **[MariaDB](https://mariadb.org/)** sincronizados (*multi-master*). Si un nodo cae, el clúster sigue trabajando y se resincroniza al volver a arrancar.
 
+![WordPress con Alta Disponibilidad](img/wordpress.png)
+
 ---
 
 ## **_Índice de contenidos_**
@@ -28,9 +30,12 @@ En esta práctica desplegamos **[WordPress](https://es.wordpress.org/)** en **Al
   - 3.1 [Despliegue de la infraestructura](#31-despliegue-de-la-infraestructura)
   - 3.2 [Comprobaciones](#32-comprobaciones)
 - 4. **[Volver a arrancar Galera tras un apagado](#4-volver-a-arrancar-galera-tras-un-apagado)**
-- 5. **[Screencast](#5-screencast)**
-- 6. **[Incidencias](#6-incidencias)**
-- 7. **[Fuentes consultadas](#7-fuentes-consultadas)**
+- 5. **[Balanceador con Keepalived](#5-balanceador-con-keepalived)**
+  - 5.1 [Instalación y configuración de Keepalived](#51-instalación-y-configuración)
+  - 5.2 [Comprobación de funcionamiento](#52-comprobación-del-funcionamiento)
+- 6. **[Screencast](#screencast)**
+- 7. **[Incidencias](#incidencias)**
+- 8. **[Fuentes consultadas](#fuentes-consultadas)**
 
 ---
 
@@ -1042,13 +1047,288 @@ vagrant ssh serverdatosAmparo -c "sudo mariadb -e 'SHOW STATUS' | grep -E 'wsrep
 
 ---
 
-## **_5. Screencast_**
+## **_5. Balanceador con Keepalived_**
 
-[Enlace al screencast](screencast/Instalacion%20CMS%20alta%20disponibilidad.mp4)
+> **Nota**: Este punto es completamente opcional, pero es recomendable realizarlo para mayor disponibilidad.
+
+Para eliminar el punto único de fallo en la entrada, añadimos un segundo balanceador (**`balanceador2Amparo`**, **`192.168.10.11`**) con la misma configuración de **Nginx** e instalamos **Keepalived** en ambos para compartir la **IP flotante (VIP)** **`192.168.10.100`**.
+
+- **[Keepalived](https://www.keepalived.org/)**: Servicio de alta disponibilidad que vigila el estado del balanceador (y de **Nginx**) para mover la IP flotante si el nodo principal falla.
+
+- **[Protocolo VRRP (*Virtual Router Redundancy Protocol*)](https://es.wikipedia.org/wiki/Virtual_Router_Redundancy_Protocol)**: Agrupa ambos balanceadores bajo un mismo identificador virtual. El **`MASTER`** (mayor prioridad) tiene la IP **`192.168.10.100`** y envía avisos al **`BACKUP`**. Si el **`MASTER`** cae, el **`BACKUP`** asume la **IP** automáticamente; al volver a arrancar, el **`MASTER`** la recupera.
+
+![Keepalived logo](img/keepalivedlogo.png)
+
+### **_5.1 Instalación y configuración_**
+
+Para la instalación y configuración, seguiremos los siguientes pasos:
+
+1. **Añadir en `.env` y `.env.example`**
+
+Comenzamos añadiendo debajo de la línea **`IP_LB=192.168.10.10`** estas dos líneas:
+
+<details>
+  <summary>
+    <strong>
+      Ver código <code>.env / .env.example</code>
+    </strong>
+  </summary>
+
+```env
+IP_LB2=192.168.10.11
+IP_VIP=192.168.10.100
+```
+
+> **EXPLICACIÓN DEL CÓDIGO**
+> ---
+> - **`IP_LB2` e `IP_VIP`**: IP interna del segundo balanceador (**`192.168.10.11`**) e IP flotante compartida (**`192.168.10.100`**).
+
+</details>
 
 ---
 
-## **_6. Incidencias_**
+![Líneas añadidas a .env y .env.example](img/Punto5/Punto5.1/lineasnueva.png)
+
+---
+
+2. **Creamos el archivo `keepalived.sh`**
+
+Dentro de la carpeta **`provision`**, crearemos el archivo **`keepalived.sh`** donde añadiremos el siguiente bloque de comandos:
+
+<details>
+  <summary>
+    <strong>
+      Ver código <code>keepalived.sh</code>
+    </strong>
+  </summary>
+
+```bash
+#!/usr/bin/env bash
+# Script 6: Alta Disponibilidad en el balanceador con Keepalived (VRRP)
+# Uso: keepalived.sh <MASTER|BACKUP> <PRIORIDAD>
+set -e
+
+export DEBIAN_FRONTEND=noninteractive
+
+STATE="$1"
+PRIORITY="$2"
+
+# 1. Carga de variables de entorno
+ENV_FILE="/vagrant/.env"
+if [ ! -f "$ENV_FILE" ]; then
+  ENV_FILE="/vagrant/.env.example"
+fi
+
+set -a
+source <(tr -d '\r' < "$ENV_FILE")
+set +a
+
+# 2. Instalación de Keepalived
+echo ">>> Instalando Keepalived en $(hostname) ($STATE, prioridad $PRIORITY)..."
+apt-get update -y
+apt-get install -y keepalived
+
+# 3. Detectar automáticamente la interfaz de la red interna (192.168.10.x)
+IFACE=$(ip -o -4 addr show | awk '/192\.168\.10\./ {print $2; exit}')
+
+# 4. Configuración de Keepalived (VRRP + comprobación de Nginx)
+cat > /etc/keepalived/keepalived.conf << EOF
+global_defs {
+    script_user root
+    enable_script_security
+}
+
+vrrp_script chk_nginx {
+    script "/usr/bin/systemctl is-active --quiet nginx"
+    interval 2
+    weight 20
+}
+
+vrrp_instance VI_1 {
+    state ${STATE}
+    interface ${IFACE}
+    virtual_router_id 51
+    priority ${PRIORITY}
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass LempHA26
+    }
+
+    virtual_ipaddress {
+        ${IP_VIP}/24
+    }
+
+    track_script {
+        chk_nginx
+    }
+}
+EOF
+
+# 5. Activar y reiniciar Keepalived
+systemctl enable --now keepalived
+systemctl restart keepalived
+
+echo ">>> Keepalived configurado en $(hostname) sobre ${IFACE} con VIP ${IP_VIP}."
+```
+
+> **EXPLICACIÓN DEL CÓDIGO**
+> ---
+> - **Parámetros `$1` y `$2`**: Rol (**`MASTER`** o **`BACKUP`**) y prioridad (**`100`** o **`90`**) pasados desde el **`Vagrantfile`**.
+> - **`IFACE`**: Detecta automáticamente la interfaz de la red interna (**`192.168.10.x`**).
+> - **`chk_nginx`**: Comprueba cada 2 segundos si **Nginx** sigue activo; si falla, cede la **IP flotante**.
+> - **`vrrp_instance VI_1`**: Configura VRRP con el mismo identificador (**`51`**), contraseña y la **IP flotante** (**`192.168.10.100/24`**).
+
+</details>
+
+---
+
+![Configuración keepalived.sh](img/Punto5/Punto5.1/keepalived.png)
+
+---
+
+3. **Actualizar la capa 1 en `Vagrantfile`**
+
+Accedemos al **`Vagrantfile`** y sustituimos el bloque de **CAPA 1** por el siguiente (manteniendo iguales las capas 2, 3 y 4):
+
+<details>
+  <summary>
+    <strong>
+      Ver código <code>Vagrantfile</code>
+    </strong>
+  </summary>
+
+```ruby
+  # ----------------------------------------------------------------------------
+  # CAPA 1: Balanceadores de carga Nginx + Keepalived (IP flotante 192.168.10.100)
+  # ----------------------------------------------------------------------------
+  config.vm.define "balanceadorAmparo" do |node|
+    node.vm.hostname = "balanceadorAmparo"
+    node.vm.network "private_network", ip: "192.168.10.10", virtualbox__intnet: "red_lemp_ha"
+    node.vm.network "forwarded_port", guest: 80, host: 8080
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "balanceadorAmparo"
+      vb.memory = "512"
+      vb.cpus = 1
+    end
+    node.vm.provision "shell", path: "provision/balanceador.sh"
+    node.vm.provision "shell", path: "provision/keepalived.sh", args: ["MASTER", "100"]
+  end
+
+  config.vm.define "balanceador2Amparo" do |node|
+    node.vm.hostname = "balanceador2Amparo"
+    node.vm.network "private_network", ip: "192.168.10.11", virtualbox__intnet: "red_lemp_ha"
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "balanceador2Amparo"
+      vb.memory = "512"
+      vb.cpus = 1
+    end
+    node.vm.provision "shell", path: "provision/balanceador.sh"
+    node.vm.provision "shell", path: "provision/keepalived.sh", args: ["BACKUP", "90"]
+  end
+end
+```
+
+> **EXPLICACIÓN DEL CÓDIGO**
+> ---
+> - **`balanceador2Amparo`**: Segundo balanceador Nginx en **`192.168.10.11`** sin puerto expuesto al anfitrión.
+> - **`keepalived.sh`**: Se ejecuta en ambos balanceadores asignando **`MASTER`** (prioridad **`100`**) al principal y **`BACKUP`** (prioridad **`90`**) al de reserva.
+
+</details>
+
+---
+
+![Actualizar capa 1](img/Punto5/Punto5.1/capa1.png)
+
+---
+
+**Cómo aplicarlo:**
+
+Para aplicarlo, vamos a ejecutar en la terminal:
+
+```powershell
+vagrant provision balanceadorAmparo
+vagrant up balanceador2Amparo
+```
+
+> **Nota**: Si no tenemos las máquinas creadas, simplemente ejecutamos **`vagrant up`**.
+
+### **_5.2 Comprobación del funcionamiento_**
+
+Realizaremos las siguientes comprobaciones:
+
+**1. Ver dónde está la IP flotante**
+
+En ambos balanceadores (donde **`balanceadorAmparo`** tiene **`192.168.10.100/24`** y **`balanceador2Amparo`** solo su **IP fija**), ejecutaremos:
+
+```powershell
+vagrant ssh balanceadorAmparo -c "ip a"
+vagrant ssh balanceador2Amparo -c "ip a"
+```
+
+![Comprobaciones Keepalived - 1](img/Punto5/Punto5.2/comprobacionkeepalived1.png)
+
+---
+
+**2. Probar acceso desde `serverNFSAmparo`**
+
+Lanzamos varias peticiones (conectándonos por **SSH** a **`serverNFSAmparo`**) y comprobamos que alternan **`serverweb1Amparo`** y **`serverweb2Amparo`**:
+
+```powershell
+# Desde serverNFSAmparo
+vagrant ssh serverNFSAmparo -c 'for i in 1 2 3 4; do curl -sI http://192.168.10.100 | grep -e HTTP/ -e X-Served-By; done'
+```
+
+![Comprobaciones Keepalived - 2](img/Punto5/Punto5.2/comprobacionkeepalived2.png)
+
+---
+
+**3. Simular caída del principal**
+
+Apagamos el servidor **`balanceadorAmparo`**, verificamos con **`ip a`** en **`balanceador2Amparo`** que tiene la **`192.168.10.100`** y repetimos las peticiones desde **`serverNFSAmparo`**:
+
+```powershell
+# Desde el anfitrión
+vagrant halt balanceadorAmparo
+
+# Desde balanceador2Amparo
+vagrant ssh balanceador2Amparo -c "ip a"
+
+# Desde serverNFSAmparo
+vagrant ssh serverNFSAmparo -c 'for i in 1 2 3 4; do curl -sI http://192.168.10.100 | grep -e HTTP/ -e X-Served-By; done'
+```
+
+![Comprobaciones Keepalived - 3](img/Punto5/Punto5.2/comprobacionkeepalived3.png)
+
+---
+
+**4. Recuperar el balanceador principal**
+
+Levantamos **`balanceadorAmparo`** y mostramos en ambos que éste posee la **IP flotante** por mayor prioridad:
+
+```powershell
+# Desde el anfitrión
+vagrant up balanceadorAmparo
+
+# Desde balanceadorAmparo y balanceador2Amparo
+vagrant ssh balanceadorAmparo -c "ip a | grep 192.168.10"
+vagrant ssh balanceador2Amparo -c "ip a | grep 192.168.10"
+```
+
+![Comprobaciones Keepalived - 4](img/Punto5/Punto5.2/comprobacionkeepalived4.png)
+
+---
+
+## **_Screencast_**
+
+**INSTALACIÓN DE CMS EN ALTA DISPONIBILIDAD**: [Enlace-Screencast](screencast/Instalacion_CMS_alta_disponibilidad.mp4)
+
+**ALTA DISPONIBILIDAD EN EL BALANCEADOR CON KEEPALIVED**: [Enlace-Screencast](screencast/KeepAlived.mp4)
+
+---
+
+## **_Incidencias_**
 
 **Pérdida del puerto `:8080` al acceder a `/wp-admin`**
 
@@ -1061,7 +1341,19 @@ Al entrar en **`http://localhost:8080/wp-admin`**, el navegador redirigía a **`
 
 ---
 
-## **_7. Fuentes consultadas_**
+**Colisión del puerto `8080` al reiniciar `balanceadorAmparo`**
+
+Al ejecutar `vagrant up balanceadorAmparo` justo después de simular su caída con `vagrant halt`, Vagrant devolvió un error indicando que el puerto `8080` ya estaba en uso en el equipo anfitrión.
+
+![Incidencia colisiones de puertos](img/Incidencias/incidencia2.png)
+
+- **Causa:** VirtualBox tardó unos segundos en liberar completamente el reenvío de puertos (**`80 → 8080`**) tras el apagado de la máquina virtual.
+- **Solución:** Comprobar en **PowerShell** que ningún otro proceso ocupaba el puerto (**`Get-NetTCPConnection -LocalPort 8080 -State Listen`**), esperar unos segundos a que VirtualBox lo liberase y volver a lanzar `vagrant up balanceadorAmparo`.
+
+
+---
+
+## **_Fuentes consultadas_**
 
 - **[MariaDB Galera Cluster](https://mariadb.com/docs/galera-cluster)**
 - **[Pledin — José Domingo Muñoz](https://www.josedomingo.org/pledin/)**
@@ -1071,3 +1363,4 @@ Al entrar en **`http://localhost:8080/wp-admin`**, el navegador redirigía a **`
 - **[Manual oficial de PHP-FPM](https://www.php.net/manual/es/install.fpm.php)**
 - **[Documentación oficial de WP-CLI](https://wp-cli.org/)**
 - **[Documentación oficial de Vagrant](https://developer.hashicorp.com/vagrant/docs)**
+- **[Documentación oficial de Keepalived](https://www.keepalived.org/doc/)**

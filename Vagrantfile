@@ -88,8 +88,8 @@ Vagrant.configure("2") do |config|
     node.vm.provision "shell", path: "provision/web.sh"
   end
 
-  # ----------------------------------------------------------------------------
-  # CAPA 1: Balanceador de carga Nginx (única máquina expuesta al anfitrión)
+# ----------------------------------------------------------------------------
+  # CAPA 1: Balanceadores de carga Nginx + Keepalived (IP flotante 192.168.10.100)
   # ----------------------------------------------------------------------------
   config.vm.define "balanceadorAmparo" do |node|
     node.vm.hostname = "balanceadorAmparo"
@@ -101,5 +101,18 @@ Vagrant.configure("2") do |config|
       vb.cpus = 1
     end
     node.vm.provision "shell", path: "provision/balanceador.sh"
+    node.vm.provision "shell", path: "provision/keepalived.sh", args: ["MASTER", "100"]
+  end
+
+  config.vm.define "balanceador2Amparo" do |node|
+    node.vm.hostname = "balanceador2Amparo"
+    node.vm.network "private_network", ip: "192.168.10.11", virtualbox__intnet: "red_lemp_ha"
+    node.vm.provider "virtualbox" do |vb|
+      vb.name = "balanceador2Amparo"
+      vb.memory = "512"
+      vb.cpus = 1
+    end
+    node.vm.provision "shell", path: "provision/balanceador.sh"
+    node.vm.provision "shell", path: "provision/keepalived.sh", args: ["BACKUP", "90"]
   end
 end
