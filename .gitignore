@@ -1,0 +1,10 @@
+# Variables sensibles (nunca subir contraseñas reales)
+.env
+
+# Archivos temporales de Vagrant y VirtualBox
+.vagrant/
+*.log
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
