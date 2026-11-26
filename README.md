@@ -1305,7 +1305,7 @@ vagrant ssh serverNFSAmparo -c 'for i in 1 2 3 4; do curl -sI http://192.168.10.
 
 **4. Recuperar el balanceador principal**
 
-Levantamos **`balanceadorAmparo`** y mostramos en ambos que éste posee la **IP flotante** por mayor prioridad:
+Levantamos **`balanceadorAmparo`** y mostramos en ambos que este posee la **IP flotante** por mayor prioridad:
 
 ```powershell
 # Desde el anfitrión
